@@ -1,60 +1,227 @@
 /*
- * SimRacingKit - H-Shifter for Raspberry Pi Pico (RP2040-Zero)
+ * SimRacingKit - Zintegrowany H-Shifter i Hamulec Ręczny
+ * Dla Raspberry Pi Pico / RP2040-Zero
  *
- * Wykorzystuje rdzeń Earle Philhowera dla RP2040.
- * Wymaga wybrania w menu Tools -> USB Stack: "Adafruit TinyUSB"
- * (jeśli chcesz niestandardową nazwę urządzenia).
+ * Funkcje:
+ * - 8 przycisków (GP0-GP7) dla biegów 1-7 + R (H-Shifter)
+ * - 16-bitowa oś analogowa (GP26) dla Hamulca Ręcznego
+ * - Kalibracja osi przez Serial i zapis w EEPROM
+ *
+ * WYMAGANIA:
+ * - Tools -> USB Stack: "Adafruit TinyUSB"
+ * - Biblioteka: Adafruit TinyUSB Library
  */
 
+#include <Arduino.h>
+#include <EEPROM.h>
 #include "Adafruit_TinyUSB.h"
 
-// Biblioteka Joystick dla rdzenia Philhowera
-#include <Joystick.h>
-
-// Definicja pinów dla biegów (zgodnie z zaproponowanym schematem)
-// GP0 -> Bieg 1, GP1 -> Bieg 2, ..., GP6 -> Bieg 7, GP7 -> R
-const int gearPins[] = {0, 1, 2, 3, 4, 5, 6, 7};
+// --- KONFIGURACJA PINÓW ---
+const int gearPins[] = {0, 1, 2, 3, 4, 5, 6, 7}; // Biegi 1-7 + R
 const int numGears = 8;
+const int POT_PIN = 26; // Hamulec (ADC0)
 
-// Tablica do debouncingu
+// --- STRUKTURA EEPROM ---
+struct Config {
+  uint16_t min_val;
+  uint16_t max_val;
+  uint8_t dz_start;
+  uint8_t dz_end;
+  uint32_t magic;
+};
+const uint32_t MAGIC_VAL = 0xABCD1234;
+Config cfg;
+
+// --- DESKRYPTOR HID (Zintegrowany) ---
+// 8 przycisków + 1 oś 16-bitowa (Brake)
+uint8_t const desc_hid_report[] = {
+    TUD_HID_REPORT_DESC_GAMEPAD(
+        HID_REPORT_ID(1), // Report ID
+        0, 0, 0, 0, 0,    // Brak standardowych osi X, Y, Z, Rz, Rx, Ry
+        HID_HAT_NONE,     // Brak Hat Switch
+        8                 // 8 przycisków
+    ),
+    // Dodajemy oś Hamulca (Brake) ręcznie, bo standardowe makro Gamepad nie ma osi 16-bitowej Brake
+    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
+    0x09, 0x04,        // Usage (Joystick)
+    0xA1, 0x01,        // Collection (Application)
+    0x85, 0x01,        //   Report ID (1) - Musi być zgodny z makrem powyżej
+    0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
+    0x09, 0x34,        //   Usage (Brake)
+    0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
+    0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
+    0x75, 0x10,        //   Report Size (16)
+    0x95, 0x01,        //   Report Count (1)
+    0x81, 0x02,        //   Input (Data, Var, Abs)
+    0xC0               // End Collection
+};
+
+// Uwaga: Używamy uproszczonego deskryptora dla maksymalnej kompatybilności
+uint8_t const custom_hid_report[] = {
+    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
+    0x09, 0x04,        // Usage (Joystick)
+    0xA1, 0x01,        // Collection (Application)
+    0x85, 0x01,        //   Report ID (1)
+    // 8 Przycisków
+    0x05, 0x09,        //   Usage Page (Button)
+    0x19, 0x01,        //   Usage Minimum (Button 1)
+    0x29, 0x08,        //   Usage Maximum (Button 8)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x25, 0x01,        //   Logical Maximum (1)
+    0x75, 0x01,        //   Report Size (1)
+    0x95, 0x08,        //   Report Count (8)
+    0x81, 0x02,        //   Input (Data, Var, Abs)
+    // Oś Hamulca (16-bit)
+    0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
+    0x09, 0x34,        //   Usage (Brake)
+    0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
+    0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
+    0x75, 0x10,        //   Report Size (16)
+    0x95, 0x01,        //   Report Count (1)
+    0x81, 0x02,        //   Input (Data, Var, Abs)
+    0xC0               // End Collection
+};
+
+// Struktura raportu zgodna z deskryptorem
+struct __attribute__((packed)) {
+  uint8_t buttons;
+  int16_t brake;
+} hid_report;
+
+Adafruit_USBD_HID usb_hid;
+
+// --- LOGIKA SHIFTERA (Debouncing) ---
 bool lastButtonState[numGears];
 unsigned long lastDebounceTime[numGears];
-const unsigned long debounceDelay = 20; // 20ms dla stabilności mechanicznych przełączników
+const unsigned long debounceDelay = 20;
+
+// --- LOGIKA HAMULCA ---
+String inputBuffer = "";
+
+void loadConfig() {
+  EEPROM.begin(256);
+  EEPROM.get(0, cfg);
+  if (cfg.magic != MAGIC_VAL) {
+    cfg.min_val = 0;
+    cfg.max_val = 65535;
+    cfg.dz_start = 0;
+    cfg.dz_end = 0;
+    cfg.magic = MAGIC_VAL;
+  }
+}
+
+void saveConfig() {
+  cfg.magic = MAGIC_VAL;
+  EEPROM.put(0, cfg);
+  EEPROM.commit();
+}
+
+int16_t processValue(uint16_t raw) {
+  uint32_t min_v = cfg.min_val;
+  uint32_t max_v = cfg.max_val;
+  if (min_v == max_v) return -32768;
+
+  uint32_t range = (max_v > min_v) ? (max_v - min_v) : (min_v - max_v);
+  uint32_t start_v = min_v + (range * cfg.dz_start / 100);
+  uint32_t end_v = max_v - (range * cfg.dz_end / 100);
+
+  if (min_v < max_v) {
+    if (raw <= start_v) return -32768;
+    if (raw >= end_v) return 32767;
+    return (int16_t)map(raw, start_v, end_v, -32768, 32767);
+  } else {
+    if (raw >= start_v) return -32768;
+    if (raw <= end_v) return 32767;
+    return (int16_t)map(raw, start_v, end_v, -32768, 32767);
+  }
+}
 
 void setup() {
-  // Konfiguracja pinów
+  Serial.begin(115200);
+  analogReadResolution(16);
+
+  // Konfiguracja pinów Shiftera
   for (int i = 0; i < numGears; i++) {
     pinMode(gearPins[i], INPUT_PULLUP);
     lastButtonState[i] = false;
     lastDebounceTime[i] = 0;
   }
 
-  // Konfiguracja nazwy urządzenia (wymaga stosu Adafruit TinyUSB w menu IDE)
-  // Jeśli używasz standardowego stosu Pico SDK, nazwa będzie domyślna.
+  loadConfig();
+
+  // Konfiguracja USB
+  usb_hid.setPollInterval(1);
+  usb_hid.setReportDescriptor(custom_hid_report, sizeof(custom_hid_report));
+
   USBDevice.setProductDescriptor("SimRacingKit");
   USBDevice.setManufacturerDescriptor("SimRacingKit");
 
-  // Inicjalizacja Joysticka
-  Joystick.begin();
+  usb_hid.begin();
 }
 
 void loop() {
-  for (int i = 0; i < numGears; i++) {
-    // Odczyt fizyczny (LOW = wciśnięty przy INPUT_PULLUP)
-    bool reading = !digitalRead(gearPins[i]);
+  bool changed = false;
 
-    // Jeśli stan się zmienił (np. przez drgania styków)
+  // 1. OBSŁUGA SHIFTERA
+  uint8_t currentButtons = 0;
+  for (int i = 0; i < numGears; i++) {
+    bool reading = !digitalRead(gearPins[i]);
     if (reading != lastButtonState[i]) {
-      // Jeśli minęło wystarczająco dużo czasu od ostatniej zmiany
       if ((millis() - lastDebounceTime[i]) > debounceDelay) {
         lastButtonState[i] = reading;
-
-        // Aktualizacja stanu przycisku w Joysticku (Philhower Core API: .button(index, state))
-        // i to numer przycisku (0-7), reading to stan (true/false)
-        Joystick.button(i + 1, reading); // Wiele gier woli numerację od 1, ale Philhower API używa 1-n
-
         lastDebounceTime[i] = millis();
       }
     }
+    if (lastButtonState[i]) {
+      currentButtons |= (1 << i);
+    }
   }
+  if (currentButtons != hid_report.buttons) {
+    hid_report.buttons = currentButtons;
+    changed = true;
+  }
+
+  // 2. OBSŁUGA HAMULCA
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; i++) sum += analogRead(POT_PIN);
+  uint16_t current_raw = sum / 16;
+  int16_t z_val = processValue(current_raw);
+
+  if (z_val != hid_report.brake) {
+    hid_report.brake = z_val;
+    changed = true;
+  }
+
+  // 3. WYSYŁANIE RAPORTU HID
+  if (changed && usb_hid.ready()) {
+    usb_hid.sendReport(1, &hid_report, sizeof(hid_report));
+  }
+
+  // 4. PROTOKÓŁ SERIAL (Komunikacja z aplikacją kalibrującą)
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      inputBuffer.trim();
+      if (inputBuffer == "READ") {
+        Serial.print("RAW:"); Serial.println(current_raw);
+      } else if (inputBuffer == "GET_CONFIG") {
+        Serial.printf("CONF:%u:%u:%u:%u\n", cfg.min_val, cfg.max_val, cfg.dz_start, cfg.dz_end);
+      } else if (inputBuffer.startsWith("SET ")) {
+        int v_min, v_max, dzs, dze;
+        if (sscanf(inputBuffer.c_str(), "SET %d %d %d %d", &v_min, &v_max, &dzs, &dze) == 4) {
+          cfg.min_val = v_min; cfg.max_val = v_max; cfg.dz_start = dzs; cfg.dz_end = dze;
+          Serial.println("OK");
+        }
+      } else if (inputBuffer == "SAVE") {
+        saveConfig(); Serial.println("SAVED");
+      } else if (inputBuffer == "PING") {
+        Serial.println("PONG");
+      }
+      inputBuffer = "";
+    } else {
+      inputBuffer += c;
+    }
+  }
+
+  delay(5);
 }
