@@ -34,29 +34,7 @@ Config cfg;
 
 // --- DESKRYPTOR HID (Zintegrowany) ---
 // 8 przycisków + 1 oś 16-bitowa (Brake)
-uint8_t const desc_hid_report[] = {
-    TUD_HID_REPORT_DESC_GAMEPAD(
-        HID_REPORT_ID(1), // Report ID
-        0, 0, 0, 0, 0,    // Brak standardowych osi X, Y, Z, Rz, Rx, Ry
-        HID_HAT_NONE,     // Brak Hat Switch
-        8                 // 8 przycisków
-    ),
-    // Dodajemy oś Hamulca (Brake) ręcznie, bo standardowe makro Gamepad nie ma osi 16-bitowej Brake
-    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x04,        // Usage (Joystick)
-    0xA1, 0x01,        // Collection (Application)
-    0x85, 0x01,        //   Report ID (1) - Musi być zgodny z makrem powyżej
-    0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
-    0x09, 0x34,        //   Usage (Brake)
-    0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
-    0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
-    0x75, 0x10,        //   Report Size (16)
-    0x95, 0x01,        //   Report Count (1)
-    0x81, 0x02,        //   Input (Data, Var, Abs)
-    0xC0               // End Collection
-};
-
-// Uwaga: Używamy uproszczonego deskryptora dla maksymalnej kompatybilności
+// Używamy surowych bajtów dla maksymalnej kompatybilności z różnymi wersjami TinyUSB
 uint8_t const custom_hid_report[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x04,        // Usage (Joystick)
