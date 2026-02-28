@@ -3,7 +3,7 @@
  * Dla Raspberry Pi Pico / RP2040-Zero
  *
  * Funkcje:
- * - 8 przycisków (GP0-GP7) dla biegów 1-7 + R (H-Shifter)
+ * - 8 przycisków dla biegów 1-7 + R (H-Shifter) - Nowe mapowanie pinów
  * - 16-bitowa oś analogowa (GP26) dla Hamulca Ręcznego
  * - Kalibracja osi przez Serial i zapis w EEPROM
  *
@@ -17,7 +17,9 @@
 #include "Adafruit_TinyUSB.h"
 
 // --- KONFIGURACJA PINÓW ---
-const int gearPins[] = {0, 1, 2, 3, 4, 5, 6, 7}; // Biegi 1-7 + R
+// Nowe mapowanie zgodnie z życzeniem:
+// Bieg 1:GP0, 2:GP1, 3:GP2, 4:GP6, 5:GP5, 6:GP7, 7:GP3, R:GP4
+const int gearPins[] = {0, 1, 2, 6, 5, 7, 3, 4};
 const int numGears = 8;
 const int POT_PIN = 26; // Hamulec (ADC0)
 
@@ -34,13 +36,12 @@ Config cfg;
 
 // --- DESKRYPTOR HID (Zintegrowany) ---
 // 8 przycisków + 1 oś 16-bitowa (Brake)
-// Używamy surowych bajtów dla maksymalnej kompatybilności z różnymi wersjami TinyUSB
+// Usunięto Report ID dla maksymalnej kompatybilności z systemem Windows
 uint8_t const custom_hid_report[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x04,        // Usage (Joystick)
     0xA1, 0x01,        // Collection (Application)
-    0x85, 0x01,        //   Report ID (1)
-    // 8 Przycisków
+    // 8 Przycisków (1 bajt)
     0x05, 0x09,        //   Usage Page (Button)
     0x19, 0x01,        //   Usage Minimum (Button 1)
     0x29, 0x08,        //   Usage Maximum (Button 8)
@@ -49,7 +50,7 @@ uint8_t const custom_hid_report[] = {
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x08,        //   Report Count (8)
     0x81, 0x02,        //   Input (Data, Var, Abs)
-    // Oś Hamulca (16-bit)
+    // Oś Hamulca (2 bajty, 16-bit)
     0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
     0x09, 0x34,        //   Usage (Brake)
     0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
@@ -62,10 +63,11 @@ uint8_t const custom_hid_report[] = {
 
 // Struktura raportu zgodna z deskryptorem
 struct __attribute__((packed)) {
-  uint8_t buttons;
-  int16_t brake;
+  uint8_t buttons = 0;
+  int16_t brake = -32768;
 } hid_report;
 
+bool firstRun = true;
 Adafruit_USBD_HID usb_hid;
 
 // --- LOGIKA SHIFTERA (Debouncing) ---
@@ -171,8 +173,9 @@ void loop() {
   }
 
   // 3. WYSYŁANIE RAPORTU HID
-  if (changed && usb_hid.ready()) {
-    usb_hid.sendReport(1, &hid_report, sizeof(hid_report));
+  if ((changed || firstRun) && usb_hid.ready()) {
+    usb_hid.sendReport(0, &hid_report, sizeof(hid_report));
+    firstRun = false;
   }
 
   // 4. PROTOKÓŁ SERIAL (Komunikacja z aplikacją kalibrującą)
