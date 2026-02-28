@@ -1,15 +1,11 @@
 /*
- * SimRacingKit V2 - Zintegrowany H-Shifter i Hamulec Ręczny
+ * SimRacingKit V3 - DIAGNOSTYCZNY
  * Dla Raspberry Pi Pico / RP2040-Zero
  *
  * Funkcje:
- * - 8 przycisków dla biegów 1-7 + R (H-Shifter)
- * - 16-bitowa oś analogowa (GP26) dla Hamulca Ręcznego (Oś Z)
- * - Kalibracja osi przez Serial i zapis w EEPROM
- *
- * WYMAGANIA:
- * - Tools -> USB Stack: "Adafruit TinyUSB"
- * - Biblioteka: Adafruit TinyUSB Library
+ * - 8 przycisków (GP0-GP7 - nowe mapowanie)
+ * - Hamulec analogowy (GP26)
+ * - DIAGNOSTYKA SERIAL: Otwórz Serial Monitor (115200), aby sprawdzić czy przyciski działają fizycznie!
  */
 
 #include <Arduino.h>
@@ -19,7 +15,8 @@
 // --- KONFIGURACJA PINÓW ---
 const int gearPins[] = {0, 1, 2, 6, 5, 7, 3, 4};
 const int numGears = 8;
-const int POT_PIN = 26; // Hamulec (ADC0)
+const int POT_PIN = 26;
+const int LED_PIN = 13; // Standardowa dioda LED dla Pico (na Zero może nie być, ale nie zaszkodzi)
 
 // --- STRUKTURA EEPROM ---
 struct Config {
@@ -32,11 +29,10 @@ struct Config {
 const uint32_t MAGIC_VAL = 0xABCD1234;
 Config cfg;
 
-// --- DESKRYPTOR HID (Zintegrowany) ---
-// Poprawiony dla maksymalnej kompatybilności z Windows
+// --- DESKRYPTOR HID V3 (Pancerny) ---
 uint8_t const custom_hid_report[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x05,        // Usage (Game Pad) - Zmieniono na Gamepad dla lepszej widoczności
+    0x09, 0x05,        // Usage (Game Pad)
     0xA1, 0x01,        // Collection (Application)
 
     // 8 Przycisków (1 bajt)
@@ -51,76 +47,73 @@ uint8_t const custom_hid_report[] = {
 
     // Oś Z (Hamulec) - 16-bit (2 bajty)
     0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
-    0x09, 0x32,        //   Usage (Z) - Zmieniono na standardową oś Z
+    0x09, 0x32,        //   Usage (Z)
     0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
     0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
     0x75, 0x10,        //   Report Size (16)
     0x95, 0x01,        //   Report Count (1)
     0x81, 0x02,        //   Input (Data, Var, Abs)
 
+    // Padding (1 bajt dopełnienia dla wyrównania do 4 bajtów - poprawia kompatybilność)
+    0x75, 0x08,        //   Report Size (8)
+    0x95, 0x01,        //   Report Count (1)
+    0x81, 0x03,        //   Input (Constant, Var, Abs)
+
     0xC0               // End Collection
 };
 
-// Struktura raportu (Łącznie 3 bajty)
+// Struktura raportu (Łącznie 4 bajty)
 struct __attribute__((packed)) {
   uint8_t buttons = 0;
   int16_t axisZ = -32768;
+  uint8_t padding = 0;
 } hid_report;
 
 bool firstRun = true;
 Adafruit_USBD_HID usb_hid;
 
-// --- LOGIKA SHIFTERA (Debouncing) ---
+// --- LOGIKA SHIFTERA ---
 bool lastButtonState[numGears];
 unsigned long lastDebounceTime[numGears];
 const unsigned long debounceDelay = 20;
 
-// --- LOGIKA HAMULCA ---
 String inputBuffer = "";
 
 void loadConfig() {
   EEPROM.begin(256);
   EEPROM.get(0, cfg);
   if (cfg.magic != MAGIC_VAL) {
-    cfg.min_val = 0;
-    cfg.max_val = 65535;
-    cfg.dz_start = 0;
-    cfg.dz_end = 0;
-    cfg.magic = MAGIC_VAL;
+    cfg.min_val = 0; cfg.max_val = 65535; cfg.dz_start = 0; cfg.dz_end = 0; cfg.magic = MAGIC_VAL;
   }
-}
-
-void saveConfig() {
-  cfg.magic = MAGIC_VAL;
-  EEPROM.put(0, cfg);
-  EEPROM.commit();
 }
 
 int16_t processValue(uint16_t raw) {
   uint32_t min_v = cfg.min_val;
   uint32_t max_v = cfg.max_val;
   if (min_v == max_v) return -32768;
-
   uint32_t range = (max_v > min_v) ? (max_v - min_v) : (min_v - max_v);
   uint32_t start_v = min_v + (range * cfg.dz_start / 100);
   uint32_t end_v = max_v - (range * cfg.dz_end / 100);
-
   if (min_v < max_v) {
-    if (raw <= start_v) return -32768;
-    if (raw >= end_v) return 32767;
+    if (raw <= start_v) return -32768; if (raw >= end_v) return 32767;
     return (int16_t)map(raw, start_v, end_v, -32768, 32767);
   } else {
-    if (raw >= start_v) return -32768;
-    if (raw <= end_v) return 32767;
+    if (raw >= start_v) return -32768; if (raw <= end_v) return 32767;
     return (int16_t)map(raw, start_v, end_v, -32768, 32767);
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  analogReadResolution(16);
+  // Poczekaj chwilę na Serial, ale nie blokuj
+  unsigned long startWait = millis();
+  while(!Serial && (millis() - startWait < 1000));
 
-  // Konfiguracja pinów Shiftera
+  Serial.println("--- SimRacingKit V3 START ---");
+
+  analogReadResolution(16);
+  pinMode(LED_PIN, OUTPUT);
+
   for (int i = 0; i < numGears; i++) {
     pinMode(gearPins[i], INPUT_PULLUP);
     lastButtonState[i] = false;
@@ -128,15 +121,10 @@ void setup() {
   }
 
   loadConfig();
-
-  // Konfiguracja USB
   usb_hid.setPollInterval(1);
   usb_hid.setReportDescriptor(custom_hid_report, sizeof(custom_hid_report));
-
-  // Zmieniono nazwę na V2 aby wymusić odświeżenie sterowników w Windows
-  USBDevice.setProductDescriptor("SimRacingKit V2");
+  USBDevice.setProductDescriptor("SimRacingKit V3");
   USBDevice.setManufacturerDescriptor("SimRacingKit");
-
   usb_hid.begin();
 }
 
@@ -151,12 +139,16 @@ void loop() {
       if ((millis() - lastDebounceTime[i]) > debounceDelay) {
         lastButtonState[i] = reading;
         lastDebounceTime[i] = millis();
+
+        // --- DIAGNOSTYKA SERIAL ---
+        Serial.print("Przycisk "); Serial.print(i + 1);
+        Serial.println(reading ? ": WCISNIETY" : ": ZWOLNIONY");
+        digitalWrite(LED_PIN, reading); // Dioda świeci jak przycisk wciśnięty
       }
     }
-    if (lastButtonState[i]) {
-      currentButtons |= (1 << i);
-    }
+    if (lastButtonState[i]) currentButtons |= (1 << i);
   }
+
   if (currentButtons != hid_report.buttons) {
     hid_report.buttons = currentButtons;
     changed = true;
@@ -179,7 +171,7 @@ void loop() {
     firstRun = false;
   }
 
-  // 4. PROTOKÓŁ SERIAL (Komunikacja z aplikacją kalibrującą)
+  // 4. PROTOKÓŁ SERIAL (Kalibracja)
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
@@ -195,7 +187,10 @@ void loop() {
           Serial.println("OK");
         }
       } else if (inputBuffer == "SAVE") {
-        saveConfig(); Serial.println("SAVED");
+        cfg.magic = MAGIC_VAL;
+        EEPROM.put(0, cfg);
+        EEPROM.commit();
+        Serial.println("SAVED");
       } else if (inputBuffer == "PING") {
         Serial.println("PONG");
       }
@@ -205,5 +200,5 @@ void loop() {
     }
   }
 
-  delay(5);
+  delay(2); // Przyspieszamy pętlę dla lepszej diagnostyki
 }
