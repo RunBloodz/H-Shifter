@@ -1,10 +1,10 @@
 /*
- * SimRacingKit - Zintegrowany H-Shifter i Hamulec Ręczny
+ * SimRacingKit V2 - Zintegrowany H-Shifter i Hamulec Ręczny
  * Dla Raspberry Pi Pico / RP2040-Zero
  *
  * Funkcje:
- * - 8 przycisków dla biegów 1-7 + R (H-Shifter) - Nowe mapowanie pinów
- * - 16-bitowa oś analogowa (GP26) dla Hamulca Ręcznego
+ * - 8 przycisków dla biegów 1-7 + R (H-Shifter)
+ * - 16-bitowa oś analogowa (GP26) dla Hamulca Ręcznego (Oś Z)
  * - Kalibracja osi przez Serial i zapis w EEPROM
  *
  * WYMAGANIA:
@@ -17,8 +17,6 @@
 #include "Adafruit_TinyUSB.h"
 
 // --- KONFIGURACJA PINÓW ---
-// Nowe mapowanie zgodnie z życzeniem:
-// Bieg 1:GP0, 2:GP1, 3:GP2, 4:GP6, 5:GP5, 6:GP7, 7:GP3, R:GP4
 const int gearPins[] = {0, 1, 2, 6, 5, 7, 3, 4};
 const int numGears = 8;
 const int POT_PIN = 26; // Hamulec (ADC0)
@@ -35,12 +33,12 @@ const uint32_t MAGIC_VAL = 0xABCD1234;
 Config cfg;
 
 // --- DESKRYPTOR HID (Zintegrowany) ---
-// 8 przycisków + 1 oś 16-bitowa (Brake)
-// Usunięto Report ID dla maksymalnej kompatybilności z systemem Windows
+// Poprawiony dla maksymalnej kompatybilności z Windows
 uint8_t const custom_hid_report[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x04,        // Usage (Joystick)
+    0x09, 0x05,        // Usage (Game Pad) - Zmieniono na Gamepad dla lepszej widoczności
     0xA1, 0x01,        // Collection (Application)
+
     // 8 Przycisków (1 bajt)
     0x05, 0x09,        //   Usage Page (Button)
     0x19, 0x01,        //   Usage Minimum (Button 1)
@@ -50,21 +48,23 @@ uint8_t const custom_hid_report[] = {
     0x75, 0x01,        //   Report Size (1)
     0x95, 0x08,        //   Report Count (8)
     0x81, 0x02,        //   Input (Data, Var, Abs)
-    // Oś Hamulca (2 bajty, 16-bit)
+
+    // Oś Z (Hamulec) - 16-bit (2 bajty)
     0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
-    0x09, 0x34,        //   Usage (Brake)
+    0x09, 0x32,        //   Usage (Z) - Zmieniono na standardową oś Z
     0x16, 0x00, 0x80,  //   Logical Minimum (-32768)
     0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
     0x75, 0x10,        //   Report Size (16)
     0x95, 0x01,        //   Report Count (1)
     0x81, 0x02,        //   Input (Data, Var, Abs)
+
     0xC0               // End Collection
 };
 
-// Struktura raportu zgodna z deskryptorem
+// Struktura raportu (Łącznie 3 bajty)
 struct __attribute__((packed)) {
   uint8_t buttons = 0;
-  int16_t brake = -32768;
+  int16_t axisZ = -32768;
 } hid_report;
 
 bool firstRun = true;
@@ -133,7 +133,8 @@ void setup() {
   usb_hid.setPollInterval(1);
   usb_hid.setReportDescriptor(custom_hid_report, sizeof(custom_hid_report));
 
-  USBDevice.setProductDescriptor("SimRacingKit");
+  // Zmieniono nazwę na V2 aby wymusić odświeżenie sterowników w Windows
+  USBDevice.setProductDescriptor("SimRacingKit V2");
   USBDevice.setManufacturerDescriptor("SimRacingKit");
 
   usb_hid.begin();
@@ -167,8 +168,8 @@ void loop() {
   uint16_t current_raw = sum / 16;
   int16_t z_val = processValue(current_raw);
 
-  if (z_val != hid_report.brake) {
-    hid_report.brake = z_val;
+  if (z_val != hid_report.axisZ) {
+    hid_report.axisZ = z_val;
     changed = true;
   }
 
