@@ -18,8 +18,8 @@
 
 // --- KONFIGURACJA PINÓW ---
 // Nowe mapowanie:
-// B1:GP5, B2:GP0, B3:GP7, B4:GP1, B5:GP4, B6:GP2, B7:GP6, R:GP3
-const int gearPins[] = {5, 0, 7, 1, 4, 2, 6, 3};
+// B1:GP5, B2:GP0, B3:GP7, B4:GP1, B5:GP4, B6:GP2, B7:GP3, R:GP6
+const int gearPins[] = {5, 0, 7, 1, 4, 2, 3, 6};
 const int numGears = 8;
 const int POT_PIN = 26;
 
